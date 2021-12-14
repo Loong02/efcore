@@ -41,6 +41,7 @@ public class RelationalSqlTranslatingExpressionVisitor : ExpressionVisitor
     private readonly ISqlExpressionFactory _sqlExpressionFactory;
     private readonly QueryableMethodTranslatingExpressionVisitor _queryableMethodTranslatingExpressionVisitor;
     private readonly SqlTypeMappingVerifyingExpressionVisitor _sqlTypeMappingVerifyingExpressionVisitor;
+    private readonly CloningExpressionVisitor _cloningExpressionVisitor;
 
     /// <summary>
     ///     Creates a new instance of the <see cref="RelationalSqlTranslatingExpressionVisitor" /> class.
@@ -59,6 +60,7 @@ public class RelationalSqlTranslatingExpressionVisitor : ExpressionVisitor
         _model = queryCompilationContext.Model;
         _queryableMethodTranslatingExpressionVisitor = queryableMethodTranslatingExpressionVisitor;
         _sqlTypeMappingVerifyingExpressionVisitor = new SqlTypeMappingVerifyingExpressionVisitor();
+        _cloningExpressionVisitor = new CloningExpressionVisitor();
     }
 
     /// <summary>
@@ -367,8 +369,14 @@ public class RelationalSqlTranslatingExpressionVisitor : ExpressionVisitor
                 return new EntityReferenceExpression(entityShaperExpression);
 
             case ProjectionBindingExpression projectionBindingExpression:
-                return ((SelectExpression)projectionBindingExpression.QueryExpression)
+                var mappedProjection = ((SelectExpression)projectionBindingExpression.QueryExpression)
                     .GetProjection(projectionBindingExpression);
+
+                // We clone the SqlExpression here so that subquery inside it doesn't share reference with projection anymore.
+                return mappedProjection is ShapedQueryExpression
+                    || mappedProjection is EntityProjectionExpression
+                    ? mappedProjection
+                    : _cloningExpressionVisitor.Visit(mappedProjection);
 
             case ShapedQueryExpression shapedQueryExpression:
                 if (shapedQueryExpression.ResultCardinality == ResultCardinality.Enumerable)
@@ -429,8 +437,8 @@ public class RelationalSqlTranslatingExpressionVisitor : ExpressionVisitor
                     return sqlExpression;
                 }
 
-                subquery.ReplaceProjection(new List<Expression>());
-                subquery.AddToProjection(sqlExpression);
+                subquery.ReplaceProjection(new List<Expression> { sqlExpression });
+                subquery.ApplyProjection();
 
                 SqlExpression scalarSubqueryExpression = new ScalarSubqueryExpression(subquery);
 
@@ -706,7 +714,8 @@ public class RelationalSqlTranslatingExpressionVisitor : ExpressionVisitor
                         var predicate = GeneratePredicateTpt(entityProjection);
 
                         subSelectExpression.ApplyPredicate(predicate);
-                        subSelectExpression.ReplaceProjection(new Dictionary<ProjectionMember, Expression>());
+                        subSelectExpression.ReplaceProjection(new List<Expression>());
+                        subSelectExpression.ApplyProjection();
                         if (subSelectExpression.Limit == null
                             && subSelectExpression.Offset == null)
                         {
@@ -842,7 +851,7 @@ public class RelationalSqlTranslatingExpressionVisitor : ExpressionVisitor
 
     private Expression? TryBindMember(Expression? source, MemberIdentity member)
     {
-        if (!(source is EntityReferenceExpression entityReferenceExpression))
+        if (source is not EntityReferenceExpression entityReferenceExpression)
         {
             return null;
         }
@@ -940,8 +949,8 @@ public class RelationalSqlTranslatingExpressionVisitor : ExpressionVisitor
             var projectionBindingExpression = (ProjectionBindingExpression)entityShaper.ValueBufferExpression;
             var entityProjectionExpression = (EntityProjectionExpression)subSelectExpression.GetProjection(projectionBindingExpression);
             var innerProjection = entityProjectionExpression.BindProperty(property);
-            subSelectExpression.ReplaceProjection(new List<Expression>());
-            subSelectExpression.AddToProjection(innerProjection);
+            subSelectExpression.ReplaceProjection(new List<Expression> { innerProjection });
+            subSelectExpression.ApplyProjection();
 
             return new ScalarSubqueryExpression(subSelectExpression);
         }
@@ -1009,7 +1018,7 @@ public class RelationalSqlTranslatingExpressionVisitor : ExpressionVisitor
     {
         result = null;
 
-        if (!(item is EntityReferenceExpression itemEntityReference))
+        if (item is not EntityReferenceExpression itemEntityReference)
         {
             return false;
         }
@@ -1299,7 +1308,7 @@ public class RelationalSqlTranslatingExpressionVisitor : ExpressionVisitor
         string baseParameterName,
         IProperty property)
     {
-        if (!(context.ParameterValues[baseParameterName] is IEnumerable<TEntity> baseListParameter))
+        if (context.ParameterValues[baseParameterName] is not IEnumerable<TEntity> baseListParameter)
         {
             return null;
         }
@@ -1337,7 +1346,7 @@ public class RelationalSqlTranslatingExpressionVisitor : ExpressionVisitor
     private static bool TranslationFailed(Expression? original, Expression? translation, out SqlExpression? castTranslation)
     {
         if (original != null
-            && !(translation is SqlExpression))
+            && translation is not SqlExpression)
         {
             castTranslation = null;
             return true;
@@ -1399,7 +1408,7 @@ public class RelationalSqlTranslatingExpressionVisitor : ExpressionVisitor
         protected override Expression VisitExtension(Expression extensionExpression)
         {
             if (extensionExpression is SqlExpression sqlExpression
-                && !(extensionExpression is SqlFragmentExpression))
+                && extensionExpression is not SqlFragmentExpression)
             {
                 if (sqlExpression.TypeMapping == null)
                 {
@@ -1409,5 +1418,14 @@ public class RelationalSqlTranslatingExpressionVisitor : ExpressionVisitor
 
             return base.VisitExtension(extensionExpression);
         }
+    }
+
+    private sealed class CloningExpressionVisitor : ExpressionVisitor
+    {
+        [return: NotNullIfNotNull("expression")]
+        public override Expression? Visit(Expression? expression)
+            => expression is SelectExpression selectExpression
+                ? selectExpression.Clone()
+                : base.Visit(expression);
     }
 }

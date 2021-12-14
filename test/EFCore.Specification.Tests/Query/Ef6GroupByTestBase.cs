@@ -458,7 +458,7 @@ public abstract class Ef6GroupByTestBase<TFixture> : QueryTestBase<TFixture>
                 .OrderBy(e => e.Key)
                 .Select(g => g.First()));
 
-    [ConditionalTheory(Skip = "Issue #26104")] // From #12640
+    [ConditionalTheory] // From #12640
     [MemberData(nameof(IsAsyncData))]
     public virtual Task Whats_new_2021_sample_3(bool async)
         => AssertQuery(
@@ -486,7 +486,7 @@ public abstract class Ef6GroupByTestBase<TFixture> : QueryTestBase<TFixture>
                       Count = people.Count()
                   });
 
-    [ConditionalTheory(Skip = "Issue #26104")] // From #12601
+    [ConditionalTheory] // From #12601
     [MemberData(nameof(IsAsyncData))]
     public virtual Task Whats_new_2021_sample_5(bool async)
         => AssertQuery(
@@ -497,7 +497,7 @@ public abstract class Ef6GroupByTestBase<TFixture> : QueryTestBase<TFixture>
                 .OrderBy(e => e),
             assertOrder: true);
 
-    [ConditionalTheory(Skip = "Issue #26104")] // From #12600
+    [ConditionalTheory] // From #12600
     [MemberData(nameof(IsAsyncData))]
     public virtual Task Whats_new_2021_sample_6(bool async)
         => AssertQuery(

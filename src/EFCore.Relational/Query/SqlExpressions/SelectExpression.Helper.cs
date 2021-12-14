@@ -772,6 +772,7 @@ public sealed partial class SelectExpression
                     _usedAliases = selectExpression._usedAliases.ToHashSet(),
                     _projectionMapping = newProjectionMappings
                 };
+                newSelectExpression._mutable = selectExpression._mutable;
 
                 newSelectExpression._tptLeftJoinTables.AddRange(selectExpression._tptLeftJoinTables);
                 // Since identifiers are ColumnExpression, they are not visited since they don't contain SelectExpression inside it.

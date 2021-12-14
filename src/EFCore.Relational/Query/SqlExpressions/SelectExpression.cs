@@ -41,12 +41,13 @@ public sealed partial class SelectExpression : TableExpressionBase
     private readonly List<TableReferenceExpression> _tableReferences = new();
     private readonly List<SqlExpression> _groupBy = new();
     private readonly List<OrderingExpression> _orderings = new();
-    private HashSet<string> _usedAliases = new();
 
     private readonly List<(ColumnExpression Column, ValueComparer Comparer)> _identifier = new();
     private readonly List<(ColumnExpression Column, ValueComparer Comparer)> _childIdentifiers = new();
-
     private readonly List<int> _tptLeftJoinTables = new();
+
+    private bool _mutable = true;
+    private HashSet<string> _usedAliases = new();
     private Dictionary<ProjectionMember, Expression> _projectionMapping = new();
     private List<Expression> _clientProjections = new();
     private readonly List<string?> _aliasForClientProjections = new();
@@ -383,7 +384,71 @@ public sealed partial class SelectExpression : TableExpressionBase
     }
 
     /// <summary>
-    ///     Adds expressions from projection mapping to projection if not done already.
+    ///     Adds expressions from projection mapping to projection ignoring the shaper expression. This method should only be used
+    ///     when populating projection in subquery.
+    /// </summary>
+    public void ApplyProjection()
+    {
+        if (!_mutable)
+        {
+            throw new InvalidOperationException("Applying projection on already finalized select expression");
+        }
+
+        _mutable = false;
+        if (_clientProjections.Count > 0)
+        {
+            for (var i = 0; i < _clientProjections.Count; i++)
+            {
+                switch(_clientProjections[i])
+                {
+                    case EntityProjectionExpression entityProjectionExpression:
+                        AddEntityProjection(entityProjectionExpression);
+                        break;
+
+                    case SqlExpression sqlExpression:
+                        AddToProjection(sqlExpression, _aliasForClientProjections[i]);
+                        break;
+
+                    default:
+                        throw new InvalidOperationException("Invalid type of projection to add when not associated with shaper expression.");
+                }
+
+            }
+
+            _clientProjections.Clear();
+        }
+        else
+        {
+            foreach (var (_, expression) in _projectionMapping)
+            {
+                if (expression is EntityProjectionExpression entityProjectionExpression)
+                {
+                    AddEntityProjection(entityProjectionExpression);
+                }
+                else
+                {
+                    AddToProjection((SqlExpression)expression);
+                }
+            }
+            _projectionMapping.Clear();
+        }
+
+        void AddEntityProjection(EntityProjectionExpression entityProjectionExpression)
+        {
+            foreach (var property in GetAllPropertiesInHierarchy(entityProjectionExpression.EntityType))
+            {
+                AddToProjection(entityProjectionExpression.BindProperty(property), null);
+            }
+
+            if (entityProjectionExpression.DiscriminatorExpression != null)
+            {
+                AddToProjection(entityProjectionExpression.DiscriminatorExpression, DiscriminatorColumnAlias);
+            }
+        }
+    }
+
+    /// <summary>
+    ///     Adds expressions from projection mapping to projection and generate updated shaper expression for materialization.
     /// </summary>
     /// <param name="shaperExpression">Current shaper expression which will shape results of this select expression.</param>
     /// <param name="resultCardinality">The result cardinality of this query expression.</param>
@@ -394,11 +459,12 @@ public sealed partial class SelectExpression : TableExpressionBase
         ResultCardinality resultCardinality,
         QuerySplittingBehavior querySplittingBehavior)
     {
-        if (Projection.Any())
+        if (!_mutable)
         {
             throw new InvalidOperationException("Applying projection on already finalized select expression");
         }
 
+        _mutable = false;
         if (_clientProjections.Count > 0)
         {
             EntityShaperNullableMarkingExpressionVisitor? entityShaperNullableMarkingExpressionVisitor = null;
@@ -448,6 +514,8 @@ public sealed partial class SelectExpression : TableExpressionBase
             if (querySplittingBehavior == QuerySplittingBehavior.SplitQuery && containsCollection)
             {
                 baseSelectExpression = (SelectExpression)cloningExpressionVisitor!.Visit(this);
+                // We mark this as mutable because the split query will combine into this and take it over.
+                baseSelectExpression._mutable = true;
                 if (resultCardinality == ResultCardinality.Single
                     || resultCardinality == ResultCardinality.SingleOrDefault)
                 {
@@ -485,6 +553,7 @@ public sealed partial class SelectExpression : TableExpressionBase
                     // again so it does contain the single result subquery too. We erase projections for it since it would be non-empty.
                     earlierClientProjectionCount = _clientProjections.Count;
                     baseSelectExpression = (SelectExpression)cloningExpressionVisitor!.Visit(this);
+                    baseSelectExpression._mutable = true;
                     baseSelectExpression._projection.Clear();
                 }
 
@@ -1584,6 +1653,11 @@ public sealed partial class SelectExpression : TableExpressionBase
         _tables.Add(setExpression);
         _tableReferences.Add(tableReferenceExpression);
 
+        // Mark both inner subqueries as immutable
+        select1._mutable = false;
+        select2._mutable = false;
+
+
         // We should apply _identifiers only when it is distinct and actual select expression had identifiers.
         if (distinct
             && outerIdentifiers.Length > 0)
@@ -1725,6 +1799,7 @@ public sealed partial class SelectExpression : TableExpressionBase
             new List<TableReferenceExpression>(),
             new List<SqlExpression>(),
             new List<OrderingExpression>());
+        dummySelectExpression._mutable = false;
 
         if (Orderings.Any()
             || Limit != null
@@ -2585,6 +2660,7 @@ public sealed partial class SelectExpression : TableExpressionBase
             Limit = Limit
         };
         subquery._usedAliases = _usedAliases;
+        subquery._mutable = false;
         _tables.Clear();
         _tableReferences.Clear();
         _groupBy.Clear();
@@ -3059,7 +3135,7 @@ public sealed partial class SelectExpression : TableExpressionBase
     /// <inheritdoc />
     protected override Expression VisitChildren(ExpressionVisitor visitor)
     {
-        if (_projection.Count == 0)
+        if (_mutable)
         {
             // If projection is not populated then we need to treat this as mutable object since it is not final yet.
             if (_clientProjections.Count > 0)
@@ -3226,7 +3302,7 @@ public sealed partial class SelectExpression : TableExpressionBase
                     Tags = Tags,
                     _usedAliases = _usedAliases
                 };
-
+                newSelectExpression._mutable = false;
                 newSelectExpression._tptLeftJoinTables.AddRange(_tptLeftJoinTables);
 
                 newSelectExpression._identifier.AddRange(identifier.Zip(_identifier).Select(e => (e.First, e.Second.Comparer)));
@@ -3315,6 +3391,8 @@ public sealed partial class SelectExpression : TableExpressionBase
         SqlExpression? limit,
         SqlExpression? offset)
     {
+        Check.DebugAssert(!_mutable, "SelectExpression shouldn't be mutable when calling this method.");
+
         var projectionMapping = new Dictionary<ProjectionMember, Expression>();
         foreach (var (projectionMember, expression) in _projectionMapping)
         {
@@ -3334,6 +3412,8 @@ public sealed partial class SelectExpression : TableExpressionBase
             IsDistinct = IsDistinct,
             Tags = Tags
         };
+
+        newSelectExpression._mutable = false;
 
         // We don't copy identifiers because when we are doing reconstruction so projection is already applied.
         // Update method should not be used pre-projection application. There are other methods to change SelectExpression.
@@ -3548,4 +3628,8 @@ public sealed partial class SelectExpression : TableExpressionBase
 
         return hash.ToHashCode();
     }
+
+#if DEBUG
+    internal bool IsMutable() => _mutable;
+#endif
 }
